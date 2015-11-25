@@ -2,6 +2,8 @@
 #include <opencv2/highgui/highgui.hpp>
 #include "opencv2/imgproc/imgproc.hpp"
 #include <iostream>
+#include <math.h>
+#include <algorithm>
 
 using namespace std;
 using namespace cv;
@@ -123,9 +125,6 @@ int main( int argc, char** argv )
             int index = markers.at<int>(i,j);
             if (index > 0 && index <= static_cast<int>(contours.size()))
                 dst.at<Vec3b>(i,j) = colors[index-1];
-            else if (index == -1){
-            	imageC3.at<Vec3b>(i,j) = Vec3b(0,0,255);
-            }
             else
                 dst.at<Vec3b>(i,j) = Vec3b(0,0,0);
         }
@@ -141,9 +140,33 @@ int main( int argc, char** argv )
     erode(dst8bit, dst8bit, kernel1, Point(-1,-1));
     vector<vector<Point> > contours2;
     findContours(dst8bit, contours2, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE);
+	
 	Scalar color(0,255,0);
-    for (size_t i = 0; i < contours2.size(); i++)
+	Scalar color2(255,0,0);
+	Scalar color3(0,0,255);
+	double clen, carea, hullarea;
+	double max_axis, min_axis, eqR;
+	vector<vector<Point> >hull( contours2.size() );
+	vector<RotatedRect> minEllipse( contours2.size() );
+    for (size_t i = 0; i < contours2.size(); i++){
         drawContours(imageC3, contours2, static_cast<int>(i), color, 1);
+        convexHull( Mat(contours2[i]), hull[i], false );
+        drawContours(imageC3, hull, static_cast<int>(i), color2, 1);
+        minEllipse[i] = fitEllipse( Mat(contours2[i]) );
+        ellipse( imageC3, minEllipse[i], color, 2, 8 );
+    	clen = arcLength(contours2[i], true);
+    	carea = contourArea(contours2[i]);
+    	eqR = sqrt(carea/M_PI);
+    	hullarea = contourArea(hull[i]);
+    	max_axis = std::max(minEllipse[i].size.height, minEllipse[i].size.width);
+    	min_axis = std::min(minEllipse[i].size.height, minEllipse[i].size.width);
+    	cout << clen << endl;
+    	cout << "Elongation: " << log2(max_axis/min_axis) << endl;
+    	cout << "Distortion: " << carea/clen/min_axis << endl;
+    	cout << "Eccentricity: " << sqrt(1-pow(min_axis/max_axis, 2.0)) << endl;
+    	cout << "Solidity: " << carea/hullarea << endl;
+    	cout << "Roundness: " << clen/2/M_PI/eqR << endl;
+    }
 
     // Visualize the final image
     imshow("Final Result", dst);
