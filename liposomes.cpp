@@ -4,6 +4,7 @@
 #include <iostream>
 #include <math.h>
 #include <algorithm>
+#include <fstream>
 
 using namespace std;
 using namespace cv;
@@ -12,79 +13,83 @@ string type2str(int);
 
 int main( int argc, char** argv )
 {
+	// Check if calling was OK
     if( argc != 2)
     {
-     cout <<" Usage: display_image ImageToLoadAndDisplay" << endl;
+     cout <<" Usage: ./liposomes [tifimage] [initial_frame] [final_frame]" << endl;
      return -1;
     }
 
-    Mat image;
-    image = imread(argv[1], CV_LOAD_IMAGE_UNCHANGED);   // Read the file
+    ofstream outfile;
+    outfile.open("test.dat");
 
-    if(! image.data )                              // Check for invalid input
+    // Read the file
+    Mat image;
+    image = imread(argv[1], CV_LOAD_IMAGE_UNCHANGED);
+
+    // Check for invalid input
+    if(! image.data )                              
     {
         cout <<  "Could not open or find the image" << endl ;
         return -1;
     }
 
-    // Convert to 8-bit image using the whole dynamic range
+    // Convert to 8-bit image using the whole dynamic range and display
     Mat image8bit;
     double min, max;
-    cout << min << ", " << max << endl; 
-	minMaxLoc(image, &min, &max);
-    
-    image.convertTo(image8bit, CV_8U, 255.0/(max-min), 255.0*min/(min-max));
+    normalize(image, image8bit, 255, 0, NORM_MINMAX, CV_8U);
 
-    // Display 8-bit image
     namedWindow( "8-bit original", CV_WINDOW_AUTOSIZE );
     imshow( "8-bit original", image8bit );
 
-    // Blur the image to reduce noise (Gaussian Blur)
+    // Blur the image to reduce noise (Gaussian Blur) and display
     Mat imageBlur;
     GaussianBlur(image8bit, imageBlur, Size(9, 9), 0, 0);
 
-    // Display blurred image
     namedWindow( "Blurred image", CV_WINDOW_AUTOSIZE );
     imshow( "Blurred image", imageBlur );
 
-    // Get binary image with Otsu Threshold
+    // Get binary image with Otsu Threshold and display
     Mat imageBW;
-    threshold(image8bit, imageBW, 40, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+    threshold(imageBlur, imageBW, 40, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
 
-    // Display binary image
     namedWindow( "Binary image", CV_WINDOW_AUTOSIZE );
     imshow( "Binary image", imageBW );
 
-    // Opening image to remove noise
+    // Closing of image to remove noise
     Mat imageMorph;
     Mat element = getStructuringElement(MORPH_RECT, Size(5,5), Point(-1,-1));
     morphologyEx(imageBW, imageMorph, MORPH_CLOSE, element);
 
-    // Now we apply dilation to determine foreground
+    // Now we apply erosion to reduce noise further
     erode(imageMorph, imageMorph, element);
 
-    // Display opening image
+    // Display final binary image
     namedWindow( "Changed binary", CV_WINDOW_AUTOSIZE );
     imshow( "Changed binary", imageMorph );
 
-    // Calculate distance transform
+    // Calculate distance transform to determine foreground
     Mat imageDist;
     distanceTransform(imageMorph, imageDist, CV_DIST_L2, 3);
-	minMaxLoc(imageDist, &min, &max);
 	normalize(imageDist, imageDist, 0, 1., NORM_MINMAX);
     
     // Display distance image
     namedWindow( "Distance image", CV_WINDOW_AUTOSIZE );
     imshow( "Distance image", imageDist );
 
-	threshold(imageDist, imageDist, .5, 1., CV_THRESH_BINARY);
+    // The biggest distances to zero are foreground 
+    Mat imageDistBinary;
+	threshold(imageDist, imageDistBinary, .7, 1., CV_THRESH_BINARY);
     Mat kernel1 = Mat::ones(3, 3, CV_8UC1);
-    dilate(imageDist, imageDist, kernel1);
+    
+    // Dilate to get a single contour
+    dilate(imageDistBinary, imageDistBinary, kernel1);
 
+    // Convert the threshold image to binary
 	Mat imageDist8u;
-    imageDist.convertTo(imageDist8u, CV_8U);
+    imageDistBinary.convertTo(imageDist8u, CV_8U);
 
-    // Find total markers
+    // Find foregroud marker contours and draw them
     vector<vector<Point> > contours;
     findContours(imageDist8u, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE);
 
@@ -93,10 +98,18 @@ int main( int argc, char** argv )
     for (size_t i = 0; i < contours.size(); i++)
         drawContours(markers, contours, static_cast<int>(i), Scalar::all(static_cast<int>(i)+1), -1);
 
+    // To get the background marker we invert the foreground binary
+    // calculate distance and get the maximum location
+    bitwise_not(imageDist8u, imageDist8u);
+    distanceTransform(imageDist8u, imageDist, CV_DIST_L2, 3);
+    Point2i min_loc, max_loc;
+    minMaxLoc(imageDist, &min, &max, &min_loc, &max_loc);
+
     // Draw the background marker
-    circle(markers, Point(5,5), 3, CV_RGB(255,255,255), -1);
+    circle(markers, max_loc, 3, CV_RGB(255,255,255), -1);
     imshow("Markers", markers*10000);
     
+    // Convert image to C3 to perform watershed and show the results
     Mat imageC3;
     cvtColor(imageBlur, imageC3, CV_GRAY2RGB);
 
@@ -129,38 +142,61 @@ int main( int argc, char** argv )
                 dst.at<Vec3b>(i,j) = Vec3b(0,0,0);
         }
     }
+    // Get the output to smooth edges
     cvtColor(dst, dst, CV_RGB2GRAY);
     Mat dst8bit;
 	minMaxLoc(dst, &min, &max);
-    
-    dst.convertTo(dst8bit, CV_8U, 255.0/(max-min), 255.0*min/(min-max));
+    normalize(dst, dst8bit, 255, 0, NORM_MINMAX, CV_8U);
+
+    // Blur the edges and erode after threshold 
     GaussianBlur(dst8bit, dst8bit, Size(25, 25), 0, 0);
     normalize(dst8bit, dst8bit, 0, 1., NORM_MINMAX);
     threshold(dst8bit, dst8bit, .9, 1., CV_THRESH_BINARY );
     erode(dst8bit, dst8bit, kernel1, Point(-1,-1));
+
+    // Find the contour of the mask
     vector<vector<Point> > contours2;
     findContours(dst8bit, contours2, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE);
 	
-	Scalar color(0,255,0);
-	Scalar color2(255,0,0);
-	Scalar color3(0,0,255);
+    // Define colors
+	Scalar green(0,255,0);
+	Scalar blue(255,0,0);
+	Scalar red(0,0,255);
+
+	// Parameters to be calculated to get geometrical properties
 	double clen, carea, hullarea;
 	double max_axis, min_axis, eqR;
 	vector<vector<Point> >hull( contours2.size() );
 	vector<RotatedRect> minEllipse( contours2.size() );
+
+	// Calculate parameters for all the contours
     for (size_t i = 0; i < contours2.size(); i++){
-        drawContours(imageC3, contours2, static_cast<int>(i), color, 1);
+    	// Calculated contour
+        drawContours(imageC3, contours2, static_cast<int>(i), green, 2);
+
+        // Convex Hull contour
         convexHull( Mat(contours2[i]), hull[i], false );
-        drawContours(imageC3, hull, static_cast<int>(i), color2, 1);
+        drawContours(imageC3, hull, static_cast<int>(i), blue, 2);
+
+        // Fit Ellipse to contour
         minEllipse[i] = fitEllipse( Mat(contours2[i]) );
-        ellipse( imageC3, minEllipse[i], color, 2, 8 );
+        ellipse( imageC3, minEllipse[i], red, 2, 2 );
+
+        // Perimeter, area and equivalent radius of liposome
     	clen = arcLength(contours2[i], true);
     	carea = contourArea(contours2[i]);
     	eqR = sqrt(carea/M_PI);
-    	hullarea = contourArea(hull[i]);
+
+    	// Major ans minor axis
     	max_axis = std::max(minEllipse[i].size.height, minEllipse[i].size.width);
     	min_axis = std::min(minEllipse[i].size.height, minEllipse[i].size.width);
-    	cout << clen << endl;
+
+    	// Area of the convex Hull
+    	hullarea = contourArea(hull[i]);
+
+    	// Print parameters on screen
+    	cout << "Equivalent Diameter: " << 2*eqR << endl;
+    	cout << "Maj axis: " << max_axis << ", Min axis: " << min_axis << endl;
     	cout << "Elongation: " << log2(max_axis/min_axis) << endl;
     	cout << "Distortion: " << carea/clen/min_axis << endl;
     	cout << "Eccentricity: " << sqrt(1-pow(min_axis/max_axis, 2.0)) << endl;
